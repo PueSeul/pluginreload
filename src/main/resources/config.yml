@@ -1,0 +1,5 @@
+# The Modrinth update project is fixed by the developer inside the plugin.
+# Users cannot change the project used for update checks from this config.
+
+# HTTP request timeout in seconds for startup checks and /pl update.
+update-timeout-seconds: 8

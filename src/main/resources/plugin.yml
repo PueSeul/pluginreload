@@ -1,0 +1,24 @@
+name: PluginsReload
+version: ${version}
+main: dev.codex.pluginsreload.PluginsReloadPlugin
+api-version: '${minecraftApiVersion}'
+author: Codex
+description: Load newly added Bukkit, Spigot, or Paper plugins while the server is running.
+commands:
+  pl:
+    description: PluginsReload command.
+    usage: /pl help
+    permission: pluginsreload.use
+permissions:
+  pluginsreload.use:
+    description: Allows use of /pl help and /pl version.
+    default: op
+  pluginsreload.reload:
+    description: Allows loading new plugin jars from the plugins folder.
+    default: op
+  pluginsreload.unload:
+    description: Allows unloading a loaded plugin.
+    default: op
+  pluginsreload.update:
+    description: Allows checking for PluginsReload updates.
+    default: op

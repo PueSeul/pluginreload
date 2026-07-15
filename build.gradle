@@ -1,0 +1,34 @@
+plugins {
+    id 'java'
+}
+
+group = 'dev.codex'
+version = '0.2'
+
+def spigotApiVersion = findProperty('spigotApiVersion') ?: '1.13.2-R0.1-SNAPSHOT'
+def minecraftApiVersion = findProperty('minecraftApiVersion') ?: '26.2'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+dependencies {
+    compileOnly "org.spigotmc:spigot-api:${spigotApiVersion}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    if (JavaVersion.current().isJava9Compatible()) {
+        options.release = 8
+    }
+}
+
+processResources {
+    def props = [version: project.version, minecraftApiVersion: minecraftApiVersion]
+    inputs.properties(props)
+    filteringCharset = 'UTF-8'
+    filesMatching('plugin.yml') {
+        expand(props)
+    }
+}
