@@ -19,4 +19,4 @@ Minecraft 26.2 Bukkit/Paper/Purpur plugin helper.
 .\gradlew.bat clean build
 ```
 
-The compiled jar is created in `build/libs/`.
+The compiled jar is created as `build/libs/PluginsReload.jar`. The file name stays the same across plugin versions.

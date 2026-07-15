@@ -32,3 +32,7 @@ processResources {
         expand(props)
     }
 }
+
+jar {
+    archiveFileName = 'PluginsReload.jar'
+}
