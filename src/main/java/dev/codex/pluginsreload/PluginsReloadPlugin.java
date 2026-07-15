@@ -43,8 +43,8 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
     private static final String PREFIX = ChatColor.DARK_GRAY + "[" + ChatColor.AQUA + "PluginsReload" + ChatColor.DARK_GRAY + "] " + ChatColor.RESET;
     private static final List<String> SUBCOMMANDS = Arrays.asList("reload", "unload", "help", "version", "update");
     private static final Pattern JSON_FIELD_PATTERN = Pattern.compile("\"%s\"\\s*:\\s*\"([^\"]*)\"");
-    private static final String UPDATE_URL = "https://api.modrinth.com/v2/project/plugins-reload/version?featured=false&include_changelog=false";
-    private static final String PROJECT_URL = "https://modrinth.com/plugin/plugins-reload";
+    private static final String UPDATE_URL = "https://api.github.com/repos/PueSeul/pluginreload/releases/latest";
+    private static final String PROJECT_URL = "https://github.com/PueSeul/pluginreload/releases";
     private final Map<String, String> pendingUnloadConfirmations = new LinkedHashMap<>();
 
     @Override
@@ -403,9 +403,6 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
 
             int responseCode = connection.getResponseCode();
             if (responseCode < 200 || responseCode >= 300) {
-                if (responseCode == 404) {
-                    return UpdateResult.pendingApprovalResult();
-                }
                 return UpdateResult.failure("HTTP " + responseCode);
             }
 
@@ -435,8 +432,14 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
     private UpdateInfo parseUpdateInfo(String response) {
         String trimmed = response.trim();
         if (trimmed.startsWith("{")) {
-            String version = jsonField(trimmed, "version");
+            String version = jsonField(trimmed, "tag_name");
+            if (isBlank(version)) {
+                version = jsonField(trimmed, "version");
+            }
             String url = jsonField(trimmed, "url");
+            if (isBlank(url)) {
+                url = jsonField(trimmed, "html_url");
+            }
             if (isBlank(url)) {
                 url = jsonField(trimmed, "downloadUrl");
             }
