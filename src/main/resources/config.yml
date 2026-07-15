@@ -1,5 +1,5 @@
 # The GitHub Releases update project is fixed by the developer inside the plugin.
 # Users cannot change the repository used for update checks from this config.
 
-# HTTP request timeout in seconds for startup checks and /pl update.
+# HTTP request timeout in seconds for startup checks and update downloads.
 update-timeout-seconds: 8

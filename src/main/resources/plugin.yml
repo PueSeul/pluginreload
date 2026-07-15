@@ -20,5 +20,5 @@ permissions:
     description: Allows unloading a loaded plugin.
     default: op
   pluginsreload.update:
-    description: Allows checking for PluginsReload updates.
+    description: Allows checking and staging PluginsReload updates.
     default: op

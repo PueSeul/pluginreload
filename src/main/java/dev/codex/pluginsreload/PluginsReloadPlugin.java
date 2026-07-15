@@ -14,7 +14,10 @@ import org.bukkit.plugin.UnknownDependencyException;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -22,6 +25,9 @@ import java.lang.reflect.Field;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -45,7 +51,9 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
     private static final Pattern JSON_FIELD_PATTERN = Pattern.compile("\"%s\"\\s*:\\s*\"([^\"]*)\"");
     private static final String UPDATE_URL = "https://api.github.com/repos/PueSeul/pluginreload/releases/latest";
     private static final String PROJECT_URL = "https://github.com/PueSeul/pluginreload/releases";
+    private static final long MAX_UPDATE_SIZE_BYTES = 50L * 1024L * 1024L;
     private final Map<String, String> pendingUnloadConfirmations = new LinkedHashMap<>();
+    private final Map<String, String> pendingUpdateConfirmations = new LinkedHashMap<>();
 
     @Override
     public void onEnable() {
@@ -77,13 +85,16 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
         switch (args[0].toLowerCase(Locale.ROOT)) {
             case "reload":
                 clearPendingUnload(sender);
+                clearPendingUpdate(sender);
                 handleReload(sender);
                 break;
             case "unload":
+                clearPendingUpdate(sender);
                 handleUnload(sender, args);
                 break;
             case "version":
                 clearPendingUnload(sender);
+                clearPendingUpdate(sender);
                 sendVersion(sender);
                 break;
             case "update":
@@ -92,6 +103,7 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
                 break;
             default:
                 clearPendingUnload(sender);
+                clearPendingUpdate(sender);
                 sender.sendMessage(PREFIX + ChatColor.RED + "알 수 없는 명령어입니다. " + ChatColor.YELLOW + "/pl help" + ChatColor.RED + "를 입력해 주세요.");
                 break;
         }
@@ -126,7 +138,7 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
         sender.sendMessage(ChatColor.YELLOW + "/pl unload <플러그인>" + ChatColor.GRAY + " - 로드된 플러그인을 비활성화하고 목록에서 제거합니다.");
         sender.sendMessage(ChatColor.YELLOW + "/pl help" + ChatColor.GRAY + " - 명령어 목록과 간단한 설명을 봅니다.");
         sender.sendMessage(ChatColor.YELLOW + "/pl version" + ChatColor.GRAY + " - 현재 PluginsReload 버전을 봅니다.");
-        sender.sendMessage(ChatColor.YELLOW + "/pl update" + ChatColor.GRAY + " - 새 버전을 확인합니다.");
+        sender.sendMessage(ChatColor.YELLOW + "/pl update" + ChatColor.GRAY + " - 새 버전을 확인하고 업데이트를 준비합니다.");
     }
     private void sendVersion(CommandSender sender) {
         sender.sendMessage(PREFIX + ChatColor.GREEN + "현재 버전: " + ChatColor.WHITE + getDescription().getVersion());
@@ -383,7 +395,7 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
         sender.sendMessage(PREFIX + ChatColor.GRAY + "업데이트를 확인하는 중입니다...");
 
         CompletableFuture.supplyAsync(this::checkUpdate)
-                .thenAccept(result -> Bukkit.getScheduler().runTask(this, () -> sendUpdateResult(sender, result)))
+                .thenAccept(result -> Bukkit.getScheduler().runTask(this, () -> handleUpdateResult(sender, result)))
                 .exceptionally(throwable -> {
                     Bukkit.getScheduler().runTask(this, () ->
                             sender.sendMessage(PREFIX + ChatColor.RED + "업데이트 확인 실패: " + ChatColor.GRAY + throwable.getMessage()));
@@ -436,24 +448,28 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
             if (isBlank(version)) {
                 version = jsonField(trimmed, "version");
             }
-            String url = jsonField(trimmed, "url");
-            if (isBlank(url)) {
-                url = jsonField(trimmed, "html_url");
+            String pageUrl = jsonField(trimmed, "html_url");
+            String assetName = "";
+            String downloadUrl = "";
+            Matcher assetMatcher = Pattern.compile(
+                    "\\\"name\\\"\\s*:\\s*\\\"([^\\\"]*PluginsReload[^\\\"]*\\.jar)\\\"[\\s\\S]*?"
+                            + "\\\"browser_download_url\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"",
+                    Pattern.CASE_INSENSITIVE).matcher(trimmed);
+            if (assetMatcher.find()) {
+                assetName = unescapeJson(assetMatcher.group(1));
+                downloadUrl = unescapeJson(assetMatcher.group(2));
             }
-            if (isBlank(url)) {
-                url = jsonField(trimmed, "downloadUrl");
-            }
-            return new UpdateInfo(version, url);
+            return new UpdateInfo(version, pageUrl, assetName, downloadUrl);
         }
 
         if (trimmed.startsWith("[")) {
             String version = jsonField(trimmed, "version_number");
             String url = jsonField(trimmed, "url");
-            return new UpdateInfo(version, url);
+            return new UpdateInfo(version, url, "", "");
         }
 
         String[] lines = trimmed.split("\\R");
-        return new UpdateInfo(lines.length == 0 ? "" : lines[0].trim(), "");
+        return new UpdateInfo(lines.length == 0 ? "" : lines[0].trim(), "", "", "");
     }
 
     private String jsonField(String json, String fieldName) {
@@ -461,18 +477,16 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
         if (!matcher.find()) {
             return "";
         }
-        return matcher.group(1).replace("\\/", "/").replace("\\\"", "\"");
+        return unescapeJson(matcher.group(1));
     }
 
-    private void sendUpdateResult(CommandSender sender, UpdateResult result) {
-        if (result.pendingApproval()) {
-            sender.sendMessage(PREFIX + ChatColor.YELLOW + "Modrinth 정식 등록/승인 전이라 아직 업데이트를 확인할 수 없습니다.");
-            sender.sendMessage(PREFIX + ChatColor.GRAY + "등록 링크: " + ChatColor.WHITE + PROJECT_URL);
-            sender.sendMessage(PREFIX + ChatColor.GRAY + "현재 버전: " + ChatColor.WHITE + getDescription().getVersion());
-            return;
-        }
+    private String unescapeJson(String value) {
+        return value.replace("\\/", "/").replace("\\\"", "\"");
+    }
 
+    private void handleUpdateResult(CommandSender sender, UpdateResult result) {
         if (!result.success()) {
+            clearPendingUpdate(sender);
             sender.sendMessage(PREFIX + ChatColor.RED + "업데이트 확인 실패: " + ChatColor.GRAY + result.error());
             return;
         }
@@ -480,22 +494,161 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
         String currentVersion = getDescription().getVersion();
         UpdateInfo latest = result.info();
         if (compareVersions(latest.version(), currentVersion) <= 0) {
-            sender.sendMessage(PREFIX + ChatColor.GREEN + "현재 버전이 최신버전입니다. " + ChatColor.GRAY + "(" + currentVersion + ")");
+            clearPendingUpdate(sender);
+            sender.sendMessage(PREFIX + ChatColor.GREEN + "현재 버전이 최신버전입니다. "
+                    + ChatColor.GRAY + "(v" + normalizeVersion(currentVersion) + ")");
             return;
         }
 
-        String downloadUrl = isBlank(latest.url()) ? PROJECT_URL : latest.url();
-        sender.sendMessage(PREFIX + ChatColor.YELLOW + "새 버전이 있습니다: " + ChatColor.WHITE + latest.version() + ChatColor.GRAY + " (현재 " + currentVersion + ")");
-        if (!isBlank(downloadUrl)) {
-            sender.sendMessage(PREFIX + ChatColor.AQUA + "업데이트 링크: " + ChatColor.WHITE + downloadUrl);
+        if (isBlank(latest.downloadUrl()) || isBlank(latest.assetName())) {
+            clearPendingUpdate(sender);
+            sender.sendMessage(PREFIX + ChatColor.RED + "최신 릴리스에서 PluginsReload JAR 파일을 찾지 못했습니다.");
+            sender.sendMessage(PREFIX + ChatColor.AQUA + "릴리스 링크: " + ChatColor.WHITE + updatePageUrl(latest));
+            return;
+        }
+
+        String confirmationKey = updateConfirmationKey(sender);
+        String pendingVersion = pendingUpdateConfirmations.get(confirmationKey);
+        if (!latest.version().equalsIgnoreCase(pendingVersion)) {
+            pendingUpdateConfirmations.put(confirmationKey, latest.version());
+            sender.sendMessage(PREFIX + ChatColor.YELLOW + "새 버전이 있습니다: " + ChatColor.WHITE + latest.version()
+                    + ChatColor.GRAY + " (현재 " + currentVersion + ")");
+            sender.sendMessage(PREFIX + ChatColor.RED + "업데이트 파일을 내려받으려면 같은 명령어를 한 번 더 입력하세요: "
+                    + ChatColor.WHITE + "/pl update");
+            return;
+        }
+
+        clearPendingUpdate(sender);
+        sender.sendMessage(PREFIX + ChatColor.GRAY + latest.version() + " 업데이트를 다운로드하는 중입니다...");
+        CompletableFuture.supplyAsync(() -> downloadUpdate(latest))
+                .thenAccept(downloadResult -> Bukkit.getScheduler().runTask(this,
+                        () -> sendDownloadResult(sender, latest, downloadResult)))
+                .exceptionally(throwable -> {
+                    Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(
+                            PREFIX + ChatColor.RED + "업데이트 다운로드 실패: " + ChatColor.GRAY + throwable.getMessage()));
+                    return null;
+                });
+    }
+
+    private DownloadResult downloadUpdate(UpdateInfo latest) {
+        int timeoutMillis = Math.max(1, getConfig().getInt("update-timeout-seconds", 8)) * 1000;
+        File pluginsDirectory = getDataFolder().getParentFile();
+        String updateFolderName = Bukkit.getUpdateFolder();
+        if (isBlank(updateFolderName)) {
+            return DownloadResult.failure("bukkit.yml의 update-folder가 비활성화되어 있습니다.");
+        }
+
+        File updateDirectory = new File(pluginsDirectory, updateFolderName);
+        File targetFile = new File(updateDirectory, getFile().getName());
+        File temporaryFile = new File(updateDirectory, targetFile.getName() + ".download");
+
+        try {
+            if (targetFile.getCanonicalFile().equals(getFile().getCanonicalFile())) {
+                return DownloadResult.failure("업데이트 폴더가 현재 plugins 폴더와 같아 안전하게 저장할 수 없습니다.");
+            }
+            Files.createDirectories(updateDirectory.toPath());
+            HttpURLConnection connection = (HttpURLConnection) URI.create(latest.downloadUrl()).toURL().openConnection();
+            connection.setConnectTimeout(timeoutMillis);
+            connection.setReadTimeout(timeoutMillis);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", "PluginsReload/" + getDescription().getVersion());
+            connection.setRequestProperty("Accept", "application/octet-stream");
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                return DownloadResult.failure("HTTP " + responseCode);
+            }
+
+            long declaredSize = connection.getContentLengthLong();
+            if (declaredSize > MAX_UPDATE_SIZE_BYTES) {
+                return DownloadResult.failure("업데이트 파일이 허용 크기(50MB)를 초과합니다.");
+            }
+
+            long downloaded = 0L;
+            try (InputStream input = new BufferedInputStream(connection.getInputStream());
+                 BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(temporaryFile))) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    downloaded += read;
+                    if (downloaded > MAX_UPDATE_SIZE_BYTES) {
+                        throw new IOException("업데이트 파일이 허용 크기(50MB)를 초과합니다.");
+                    }
+                    output.write(buffer, 0, read);
+                }
+            }
+
+            validateDownloadedPlugin(temporaryFile, latest.version());
+            moveUpdateIntoPlace(temporaryFile, targetFile);
+            return DownloadResult.success(targetFile);
+        } catch (IllegalArgumentException | IOException exception) {
+            try {
+                Files.deleteIfExists(temporaryFile.toPath());
+            } catch (IOException cleanupException) {
+                exception.addSuppressed(cleanupException);
+            }
+            return DownloadResult.failure(exception.getMessage());
         }
     }
 
-    private void logStartupUpdateResult(UpdateResult result) {
-        if (result.pendingApproval()) {
+    private void validateDownloadedPlugin(File jarFile, String expectedVersion) throws IOException {
+        try (JarFile jar = new JarFile(jarFile)) {
+            JarEntry pluginEntry = jar.getJarEntry("plugin.yml");
+            if (pluginEntry == null) {
+                throw new IOException("다운로드한 파일에 plugin.yml이 없습니다.");
+            }
+
+            PluginDescriptionFile description;
+            try (InputStream input = jar.getInputStream(pluginEntry)) {
+                description = new PluginDescriptionFile(input);
+            } catch (InvalidDescriptionException exception) {
+                throw new IOException("다운로드한 plugin.yml을 읽을 수 없습니다.", exception);
+            }
+
+            if (!getName().equalsIgnoreCase(description.getName())) {
+                throw new IOException("다운로드한 JAR의 플러그인 이름이 일치하지 않습니다: " + description.getName());
+            }
+            if (compareVersions(description.getVersion(), expectedVersion) != 0) {
+                throw new IOException("다운로드한 JAR의 버전이 릴리스 버전과 일치하지 않습니다: "
+                        + description.getVersion() + " / " + expectedVersion);
+            }
+        }
+    }
+
+    private void moveUpdateIntoPlace(File temporaryFile, File targetFile) throws IOException {
+        try {
+            Files.move(temporaryFile.toPath(), targetFile.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException ignored) {
+            Files.move(temporaryFile.toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private void sendDownloadResult(CommandSender sender, UpdateInfo latest, DownloadResult result) {
+        if (!result.success()) {
+            sender.sendMessage(PREFIX + ChatColor.RED + "업데이트 다운로드 실패: " + ChatColor.GRAY + result.error());
+            sender.sendMessage(PREFIX + ChatColor.AQUA + "릴리스 링크: " + ChatColor.WHITE + updatePageUrl(latest));
             return;
         }
 
+        sender.sendMessage(PREFIX + ChatColor.GREEN + "업데이트 준비 완료: " + ChatColor.WHITE + latest.version());
+        sender.sendMessage(PREFIX + ChatColor.YELLOW + "서버를 완전히 재시작하면 새 버전이 적용됩니다.");
+        sender.sendMessage(PREFIX + ChatColor.GRAY + "저장 위치: " + result.file().getPath());
+    }
+
+    private String updatePageUrl(UpdateInfo latest) {
+        return isBlank(latest.pageUrl()) ? PROJECT_URL : latest.pageUrl();
+    }
+
+    private String updateConfirmationKey(CommandSender sender) {
+        return sender.getClass().getName() + ":" + sender.getName().toLowerCase(Locale.ROOT);
+    }
+
+    private void clearPendingUpdate(CommandSender sender) {
+        pendingUpdateConfirmations.remove(updateConfirmationKey(sender));
+    }
+
+    private void logStartupUpdateResult(UpdateResult result) {
         if (!result.success()) {
             getLogger().warning("Startup update check failed: " + result.error());
             return;
@@ -508,7 +661,7 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
             return;
         }
 
-        String downloadUrl = isBlank(latest.url()) ? PROJECT_URL : latest.url();
+        String downloadUrl = updatePageUrl(latest);
         getLogger().warning("A new PluginsReload version is available: " + latest.version() + " (current " + currentVersion + ")");
         if (!isBlank(downloadUrl)) {
             getLogger().warning("Update link: " + downloadUrl);
@@ -516,8 +669,10 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
     }
 
     private int compareVersions(String left, String right) {
-        List<Integer> leftParts = versionParts(left);
-        List<Integer> rightParts = versionParts(right);
+        String normalizedLeft = normalizeVersion(left);
+        String normalizedRight = normalizeVersion(right);
+        List<Integer> leftParts = versionParts(normalizedLeft);
+        List<Integer> rightParts = versionParts(normalizedRight);
         int max = Math.max(leftParts.size(), rightParts.size());
         for (int index = 0; index < max; index++) {
             int leftPart = index < leftParts.size() ? leftParts.get(index) : 0;
@@ -526,7 +681,17 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
                 return Integer.compare(leftPart, rightPart);
             }
         }
-        return left.compareToIgnoreCase(right);
+        return normalizedLeft.compareToIgnoreCase(normalizedRight);
+    }
+
+    private String normalizeVersion(String version) {
+        String normalized = version == null ? "" : version.trim();
+        if (normalized.length() > 1
+                && (normalized.charAt(0) == 'v' || normalized.charAt(0) == 'V')
+                && Character.isDigit(normalized.charAt(1))) {
+            return normalized.substring(1);
+        }
+        return normalized;
     }
 
     private List<Integer> versionParts(String version) {
@@ -569,41 +734,47 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
 
     private static final class UpdateInfo {
         private final String version;
-        private final String url;
+        private final String pageUrl;
+        private final String assetName;
+        private final String downloadUrl;
 
-        private UpdateInfo(String version, String url) {
+        private UpdateInfo(String version, String pageUrl, String assetName, String downloadUrl) {
             this.version = version == null ? "" : version;
-            this.url = url == null ? "" : url;
+            this.pageUrl = pageUrl == null ? "" : pageUrl;
+            this.assetName = assetName == null ? "" : assetName;
+            this.downloadUrl = downloadUrl == null ? "" : downloadUrl;
         }
 
         private String version() {
             return version;
         }
 
-        private String url() {
-            return url;
+        private String pageUrl() {
+            return pageUrl;
+        }
+
+        private String assetName() {
+            return assetName;
+        }
+
+        private String downloadUrl() {
+            return downloadUrl;
         }
     }
 
     private static final class UpdateResult {
         private final boolean success;
-        private final boolean pendingApproval;
         private final UpdateInfo info;
         private final String error;
 
-        private UpdateResult(boolean success, boolean pendingApproval, UpdateInfo info, String error) {
+        private UpdateResult(boolean success, UpdateInfo info, String error) {
             this.success = success;
-            this.pendingApproval = pendingApproval;
             this.info = info;
             this.error = error;
         }
 
         private boolean success() {
             return success;
-        }
-
-        private boolean pendingApproval() {
-            return pendingApproval;
         }
 
         private UpdateInfo info() {
@@ -615,15 +786,44 @@ public final class PluginsReloadPlugin extends JavaPlugin implements TabExecutor
         }
 
         static UpdateResult success(UpdateInfo info) {
-            return new UpdateResult(true, false, info, "");
-        }
-
-        static UpdateResult pendingApprovalResult() {
-            return new UpdateResult(false, true, new UpdateInfo("", ""), "");
+            return new UpdateResult(true, info, "");
         }
 
         static UpdateResult failure(String error) {
-            return new UpdateResult(false, false, new UpdateInfo("", ""), error == null ? "알 수 없는 오류" : error);
+            return new UpdateResult(false, new UpdateInfo("", "", "", ""),
+                    error == null ? "알 수 없는 오류" : error);
+        }
+    }
+
+    private static final class DownloadResult {
+        private final boolean success;
+        private final File file;
+        private final String error;
+
+        private DownloadResult(boolean success, File file, String error) {
+            this.success = success;
+            this.file = file;
+            this.error = error;
+        }
+
+        private boolean success() {
+            return success;
+        }
+
+        private File file() {
+            return file;
+        }
+
+        private String error() {
+            return error;
+        }
+
+        static DownloadResult success(File file) {
+            return new DownloadResult(true, file, "");
+        }
+
+        static DownloadResult failure(String error) {
+            return new DownloadResult(false, null, error == null ? "알 수 없는 오류" : error);
         }
     }
 }
